@@ -1,0 +1,48 @@
+# api-server/
+api-server/debug/
+api-server/target/
+
+# web-ui/
+# dependencies
+web-ui/node_modules
+web-ui/.pnp
+web-ui/.pnp.*
+web-ui/.yarn/*
+web-ui/!.yarn/patches
+web-ui/!.yarn/plugins
+web-ui/!.yarn/releases
+web-ui/!.yarn/versions
+
+# testing
+web-ui/coverage
+
+# next.js
+web-ui/.next/
+web-ui/out/
+
+# production
+web-ui/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+web-ui/npm-debug.log*
+web-ui/yarn-debug.log*
+web-ui/yarn-error.log*
+web-ui/.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+*storybook.log
+storybook-static
+
