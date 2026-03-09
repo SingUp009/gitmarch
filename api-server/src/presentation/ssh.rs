@@ -10,7 +10,10 @@ use russh::{Channel, ChannelId, CryptoVec};
 use russh_keys::key::{KeyPair, PublicKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub async fn serve(base_dir: PathBuf) -> Result<()> {
+use crate::db::Pool;
+use crate::feature::user;
+
+pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
     let bind_addr = env::var("SSH_BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:2222".to_string());
 
@@ -28,6 +31,7 @@ pub async fn serve(base_dir: PathBuf) -> Result<()> {
 
     let mut server = SshServer {
         base_dir: Arc::new(base_dir),
+        pool,
     };
 
     println!("SSH listening on {bind_addr}");
@@ -44,6 +48,7 @@ pub async fn serve(base_dir: PathBuf) -> Result<()> {
 
 struct SshServer {
     base_dir: Arc<PathBuf>,
+    pool: Arc<Pool>,
 }
 
 impl Server for SshServer {
@@ -52,6 +57,7 @@ impl Server for SshServer {
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> SshSession {
         SshSession {
             base_dir: self.base_dir.clone(),
+            pool: self.pool.clone(),
             child_stdin: None,
         }
     }
@@ -63,6 +69,7 @@ impl Server for SshServer {
 
 struct SshSession {
     base_dir: Arc<PathBuf>,
+    pool: Arc<Pool>,
     /// Stdin of the spawned git process; populated in `exec_request`.
     child_stdin: Option<tokio::process::ChildStdin>,
 }
@@ -71,14 +78,28 @@ struct SshSession {
 impl Handler for SshSession {
     type Error = anyhow::Error;
 
-    // Accept every public key for now.
-    // TODO: validate against user-registered keys stored in the database.
+    /// DB に登録済みの SSH 公開鍵と照合して認証する。
+    ///
+    /// # 認証の流れ
+    /// 1. 受け取った公開鍵のフィンガープリント（SHA256ハッシュ）を計算
+    /// 2. DB の `ssh_keys.fingerprint` カラムと照合
+    /// 3. 一致すれば Accept、なければ Reject
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _public_key: &PublicKey,
+        public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        Ok(Auth::Accept)
+        let authorized = user::is_key_authorized(&self.pool, public_key)
+            .await
+            .unwrap_or(false);
+
+        if authorized {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::Reject {
+                proceed_with_methods: None,
+            })
+        }
     }
 
     async fn channel_open_session(

@@ -1,8 +1,10 @@
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, RawQuery, State};
+use axum::routing::delete;
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -10,12 +12,15 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::db::Pool;
 use crate::feature::git::{RunGitError, run_git_command};
 use crate::feature::repo::{CreateRepoError, create_bare_repo};
+use crate::feature::user;
 
 #[derive(Debug, Clone)]
 struct AppState {
     base_dir: PathBuf,
+    pool: Arc<Pool>,
 }
 
 #[derive(Debug)]
@@ -39,10 +44,10 @@ struct ErrorResponse {
     error: String,
 }
 
-pub async fn serve(base_dir: PathBuf) -> Result<()> {
+pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
 
-    let app = build_router(base_dir);
+    let app = build_router(base_dir, pool);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("failed to bind HTTP server to {bind_addr}"))?;
@@ -52,12 +57,21 @@ pub async fn serve(base_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn build_router(base_dir: PathBuf) -> Router {
+pub fn build_router(base_dir: PathBuf, pool: Arc<Pool>) -> Router {
     Router::new()
         .route("/git/{operation}", get(run_git_handler))
         .route("/repos", post(create_repo_handler))
+        // ユーザー管理
+        .route("/users", get(list_users_handler).post(create_user_handler))
+        .route("/users/{username}", get(get_user_handler))
+        // SSH 鍵管理
+        .route(
+            "/users/{username}/keys",
+            get(list_keys_handler).post(add_key_handler),
+        )
+        .route("/users/{username}/keys/{key_id}", delete(delete_key_handler))
         .layer(build_cors_layer())
-        .with_state(AppState { base_dir })
+        .with_state(AppState { base_dir, pool })
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +109,143 @@ async fn create_repo_handler(
     }
 }
 
+// ---------------------------------------------------------------------------
+// ユーザー管理ハンドラー
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CreateUserRequest {
+    username: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UserResponse {
+    id: i64,
+    username: String,
+    created_at: String,
+}
+
+impl From<user::User> for UserResponse {
+    fn from(u: user::User) -> Self {
+        Self {
+            id: u.id,
+            username: u.username,
+            created_at: u.created_at,
+        }
+    }
+}
+
+async fn list_users_handler(State(state): State<AppState>) -> Response {
+    match user::list_users(&state.pool).await {
+        Ok(users) => {
+            let body: Vec<UserResponse> = users.into_iter().map(Into::into).collect();
+            Json(body).into_response()
+        }
+        Err(e) => internal_error(e.to_string()),
+    }
+}
+
+async fn create_user_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CreateUserRequest>,
+) -> Response {
+    match user::create_user(&state.pool, &body.username).await {
+        Ok(u) => (StatusCode::CREATED, Json(UserResponse::from(u))).into_response(),
+        Err(e) => bad_request(e.to_string()),
+    }
+}
+
+async fn get_user_handler(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Response {
+    match user::find_user(&state.pool, &username).await {
+        Ok(Some(u)) => Json(UserResponse::from(u)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("user `{username}` not found"),
+            }),
+        )
+            .into_response(),
+        Err(e) => internal_error(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSH 鍵管理ハンドラー
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AddKeyRequest {
+    /// authorized_keys 形式の1行: `ssh-ed25519 AAAA... comment`
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SshKeyResponse {
+    id: i64,
+    fingerprint: String,
+    key_type: String,
+    key_data: String,
+    comment: String,
+    created_at: String,
+}
+
+impl From<user::SshKey> for SshKeyResponse {
+    fn from(k: user::SshKey) -> Self {
+        Self {
+            id: k.id,
+            fingerprint: k.fingerprint,
+            key_type: k.key_type,
+            key_data: k.key_data,
+            comment: k.comment,
+            created_at: k.created_at,
+        }
+    }
+}
+
+async fn list_keys_handler(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Response {
+    match user::list_ssh_keys(&state.pool, &username).await {
+        Ok(keys) => {
+            let body: Vec<SshKeyResponse> = keys.into_iter().map(Into::into).collect();
+            Json(body).into_response()
+        }
+        Err(e) => internal_error(e.to_string()),
+    }
+}
+
+async fn add_key_handler(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    Json(body): Json<AddKeyRequest>,
+) -> Response {
+    match user::add_ssh_key(&state.pool, &username, &body.key).await {
+        Ok(key) => (StatusCode::CREATED, Json(SshKeyResponse::from(key))).into_response(),
+        Err(e) => bad_request(e.to_string()),
+    }
+}
+
+async fn delete_key_handler(
+    State(state): State<AppState>,
+    Path((username, key_id)): Path<(String, i64)>,
+) -> Response {
+    match user::delete_ssh_key(&state.pool, &username, key_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("key {key_id} not found for user `{username}`"),
+            }),
+        )
+            .into_response(),
+        Err(e) => internal_error(e.to_string()),
+    }
+}
+
 fn build_cors_layer() -> CorsLayer {
     let allowed_origins_raw = env::var("CORS_ALLOW_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string());
@@ -107,7 +258,7 @@ fn build_cors_layer() -> CorsLayer {
         .collect();
 
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
     if allowed_origins.is_empty() {
@@ -189,8 +340,18 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
+
+    /// テスト用のインメモリ DB プールを作成する。
+    async fn test_pool() -> Arc<crate::db::Pool> {
+        Arc::new(
+            crate::db::connect(":memory:")
+                .await
+                .expect("test DB should open"),
+        )
+    }
 
     fn unique_temp_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -228,7 +389,7 @@ mod tests {
         let repo = base.join("repo");
         init_repo(&repo);
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -259,7 +420,7 @@ mod tests {
         let repo = base.join("repo");
         init_repo(&repo);
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -288,7 +449,7 @@ mod tests {
         let base = unique_temp_path("missing_path");
         fs::create_dir_all(&base).expect("failed to create base dir");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -317,7 +478,7 @@ mod tests {
         let base = unique_temp_path("missing_cmd");
         fs::create_dir_all(&base).expect("failed to create base dir");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -339,7 +500,7 @@ mod tests {
         let repo = base.join("repo");
         init_repo(&repo);
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -368,7 +529,7 @@ mod tests {
         let base = unique_temp_path("escape");
         fs::create_dir_all(base.join("repo")).expect("failed to create repo dir");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -389,7 +550,7 @@ mod tests {
         let base = unique_temp_path("absolute_path");
         fs::create_dir_all(base.join("repo")).expect("failed to create repo dir");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -425,7 +586,7 @@ mod tests {
         fs::create_dir_all(&outside).expect("failed to create outside dir");
         symlink(&outside, base.join("linked")).expect("failed to create symlink");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -447,7 +608,7 @@ mod tests {
         let base = unique_temp_path("non_repo");
         fs::create_dir_all(base.join("dir")).expect("failed to create target dir");
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -476,7 +637,7 @@ mod tests {
     async fn returns_500_when_base_dir_is_not_accessible() {
         let base = unique_temp_path("missing_base_dir");
 
-        let app = build_router(base);
+        let app = build_router(base, test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -504,7 +665,7 @@ mod tests {
         let repo = base.join("repo");
         init_repo(&repo);
 
-        let app = build_router(base.clone());
+        let app = build_router(base.clone(), test_pool().await);
         let response = app
             .oneshot(
                 Request::builder()
