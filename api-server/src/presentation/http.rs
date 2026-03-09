@@ -45,7 +45,7 @@ struct ErrorResponse {
 }
 
 pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
-    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
     let app = build_router(base_dir, pool);
     let listener = tokio::net::TcpListener::bind(&bind_addr)

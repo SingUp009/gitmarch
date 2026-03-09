@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+dotenvy = "0.15"
 async-trait = "0.1"
 axum = "0.8.6"
 data-encoding = "2"
