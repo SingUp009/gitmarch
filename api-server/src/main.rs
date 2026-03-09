@@ -1,8 +1,10 @@
+mod db;
 mod feature;
 mod presentation;
 
 use std::io::{Error as IoError, ErrorKind};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -10,9 +12,14 @@ use anyhow::{Context, Result};
 async fn main() -> Result<()> {
     let base_dir = resolve_base_dir()?;
 
+    let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "gitmarch.db".to_string());
+    let pool = Arc::new(db::connect(&db_path).await?);
+
+    println!("Database opened at {db_path}");
+
     tokio::try_join!(
-        presentation::http::serve(base_dir.clone()),
-        presentation::ssh::serve(base_dir),
+        presentation::http::serve(base_dir.clone(), pool.clone()),
+        presentation::ssh::serve(base_dir, pool),
     )?;
 
     Ok(())
