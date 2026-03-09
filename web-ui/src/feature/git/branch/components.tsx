@@ -15,7 +15,6 @@ export const BranchList = (props: Props) => {
     const handleBranchSelect = async (branchName: string) => {
         try {
             await switchBranch(props.repository, branchName);
-            alert(`Checked out to branch: ${branchName}`);
         } catch (error) {
             console.error("Failed to checkout branch", error);
             alert(`Failed to checkout branch: ${error instanceof Error ? error.message : String(error)}`);

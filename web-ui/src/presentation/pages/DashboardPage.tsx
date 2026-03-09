@@ -1,14 +1,17 @@
+"use client";
+
 import { BranchList } from "@/feature/git/branch/components";
+import { useState } from "react";
 
 export default function DashboardPage() {
+  const [repository, setRepository] = useState("test");
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-          Dashboard Page
-        </h1>
-        <BranchList repository="test" />
-      </main>
+    <div className="max-w-3xl space-y-6">
+      <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+        ダッシュボード
+      </h1>
+      <BranchList repository={repository} />
     </div>
   );
 }
