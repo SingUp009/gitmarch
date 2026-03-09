@@ -5,12 +5,13 @@ use anyhow::{Context, Result};
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::feature::git::{RunGitError, run_git_command};
+use crate::feature::repo::{CreateRepoError, create_bare_repo};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -54,8 +55,44 @@ pub async fn serve(base_dir: PathBuf) -> Result<()> {
 pub fn build_router(base_dir: PathBuf) -> Router {
     Router::new()
         .route("/git/{operation}", get(run_git_handler))
+        .route("/repos", post(create_repo_handler))
         .layer(build_cors_layer())
         .with_state(AppState { base_dir })
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRepoRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateRepoResponse {
+    name: String,
+}
+
+async fn create_repo_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CreateRepoRequest>,
+) -> Response {
+    match create_bare_repo(&state.base_dir, &body.name).await {
+        Ok(path) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&body.name)
+                .to_string();
+            (StatusCode::CREATED, Json(CreateRepoResponse { name })).into_response()
+        }
+        Err(CreateRepoError::InvalidName(msg)) => bad_request(msg),
+        Err(CreateRepoError::AlreadyExists(name)) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("repository `{name}` already exists"),
+            }),
+        )
+            .into_response(),
+        Err(CreateRepoError::ExecutionFailed(msg)) => internal_error(msg),
+    }
 }
 
 fn build_cors_layer() -> CorsLayer {
@@ -70,7 +107,7 @@ fn build_cors_layer() -> CorsLayer {
         .collect();
 
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers(Any);
 
     if allowed_origins.is_empty() {
