@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, RawQuery, State};
-use axum::routing::delete;
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::delete;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,9 @@ pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
         .with_context(|| format!("failed to bind HTTP server to {bind_addr}"))?;
 
     println!("HTTP listening on {bind_addr}");
-    axum::serve(listener, app).await.context("HTTP server failed")?;
+    axum::serve(listener, app)
+        .await
+        .context("HTTP server failed")?;
     Ok(())
 }
 
@@ -69,7 +71,10 @@ pub fn build_router(base_dir: PathBuf, pool: Arc<Pool>) -> Router {
             "/users/{username}/keys",
             get(list_keys_handler).post(add_key_handler),
         )
-        .route("/users/{username}/keys/{key_id}", delete(delete_key_handler))
+        .route(
+            "/users/{username}/keys/{key_id}",
+            delete(delete_key_handler),
+        )
         .layer(build_cors_layer())
         .with_state(AppState { base_dir, pool })
 }
@@ -155,10 +160,7 @@ async fn create_user_handler(
     }
 }
 
-async fn get_user_handler(
-    State(state): State<AppState>,
-    Path(username): Path<String>,
-) -> Response {
+async fn get_user_handler(State(state): State<AppState>, Path(username): Path<String>) -> Response {
     match user::find_user(&state.pool, &username).await {
         Ok(Some(u)) => Json(UserResponse::from(u)).into_response(),
         Ok(None) => (

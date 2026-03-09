@@ -1,0 +1,83 @@
+name: web-ui
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web-ui/**"
+      - ".github/workflows/web-ui.yml"
+  pull_request:
+    paths:
+      - "web-ui/**"
+      - ".github/workflows/web-ui.yml"
+
+defaults:
+  run:
+    working-directory: web-ui
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web-ui/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: vitest
+        run: pnpm test -- --run
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web-ui/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: oxlint
+        run: pnpm run lint
+
+      - name: oxfmt
+        run: pnpm run format:check
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web-ui/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: next build
+        run: pnpm run build

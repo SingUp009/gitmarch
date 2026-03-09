@@ -29,9 +29,8 @@ fn resolve_base_dir() -> Result<PathBuf> {
     let raw = std::env::var("GIT_BASE_DIR")
         .map_err(|_| IoError::new(ErrorKind::InvalidInput, "GIT_BASE_DIR is required"))?;
 
-    let path = std::fs::canonicalize(&raw).with_context(|| {
-        format!("failed to canonicalize GIT_BASE_DIR (`{raw}`)")
-    })?;
+    let path = std::fs::canonicalize(&raw)
+        .with_context(|| format!("failed to canonicalize GIT_BASE_DIR (`{raw}`)"))?;
 
     if !path.is_dir() {
         return Err(IoError::new(

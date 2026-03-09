@@ -1,6 +1,11 @@
 # api-server/
 api-server/debug/
 api-server/target/
+api-server/*.db
+api-server/ssh_host_key
+
+# repositories (runtime data)
+repositories/
 
 # web-ui/
 # dependencies

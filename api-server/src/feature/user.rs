@@ -46,13 +46,11 @@ pub async fn create_user(pool: &Pool, username: &str) -> Result<User> {
     // `sqlx::query_as::<_, User>(sql)` はランタイムで SQL を実行する。
     // `sqlx::query_as!(User, sql)` はコンパイル時に SQL を検証するが、
     // `DATABASE_URL` 環境変数が必要。ここではシンプルさを優先してランタイム版を使う。
-    let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (username) VALUES (?) RETURNING *",
-    )
-    .bind(username)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to create user `{username}`"))?;
+    let user = sqlx::query_as::<_, User>("INSERT INTO users (username) VALUES (?) RETURNING *")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("failed to create user `{username}`"))?;
 
     Ok(user)
 }
@@ -68,12 +66,11 @@ pub async fn list_users(pool: &Pool) -> Result<Vec<User>> {
 
 /// username でユーザーを取得する。存在しない場合は `None`。
 pub async fn find_user(pool: &Pool, username: &str) -> Result<Option<User>> {
-    let user =
-        sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(pool)
-            .await
-            .with_context(|| format!("failed to find user `{username}`"))?;
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| format!("failed to find user `{username}`"))?;
     Ok(user)
 }
 
@@ -92,8 +89,7 @@ pub async fn add_ssh_key(pool: &Pool, username: &str, key_line: &str) -> Result<
     let (key_type, key_data, comment) = parse_public_key_line(key_line)?;
 
     // russh_keys で公開鍵をパース・検証し、フィンガープリントを取得する。
-    let public_key = decode_public_key(&key_type, &key_data)
-        .context("invalid SSH public key")?;
+    let public_key = decode_public_key(&key_type, &key_data).context("invalid SSH public key")?;
     let fingerprint = public_key.fingerprint();
 
     let key = sqlx::query_as::<_, SshKey>(
@@ -119,13 +115,11 @@ pub async fn list_ssh_keys(pool: &Pool, username: &str) -> Result<Vec<SshKey>> {
         .await?
         .with_context(|| format!("user `{username}` not found"))?;
 
-    let keys = sqlx::query_as::<_, SshKey>(
-        "SELECT * FROM ssh_keys WHERE user_id = ? ORDER BY id",
-    )
-    .bind(user.id)
-    .fetch_all(pool)
-    .await
-    .context("failed to list SSH keys")?;
+    let keys = sqlx::query_as::<_, SshKey>("SELECT * FROM ssh_keys WHERE user_id = ? ORDER BY id")
+        .bind(user.id)
+        .fetch_all(pool)
+        .await
+        .context("failed to list SSH keys")?;
 
     Ok(keys)
 }
@@ -318,7 +312,9 @@ mod tests {
 
         let keypair = russh_keys::key::KeyPair::generate_ed25519().unwrap();
         let pubkey = keypair.clone_public_key().unwrap();
-        add_ssh_key(&pool, "eve", &pubkey_to_key_line(&pubkey, "")).await.unwrap();
+        add_ssh_key(&pool, "eve", &pubkey_to_key_line(&pubkey, ""))
+            .await
+            .unwrap();
 
         let keys = list_ssh_keys(&pool, "eve").await.unwrap();
         let removed = delete_ssh_key(&pool, "eve", keys[0].id).await.unwrap();

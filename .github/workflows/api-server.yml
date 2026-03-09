@@ -1,0 +1,52 @@
+name: api-server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api-server/**"
+      - ".github/workflows/api-server.yml"
+  pull_request:
+    paths:
+      - "api-server/**"
+      - ".github/workflows/api-server.yml"
+
+defaults:
+  run:
+    working-directory: api-server
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api-server
+
+      - name: cargo test
+        run: cargo test
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api-server
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy -- -D warnings

@@ -19,10 +19,7 @@ impl std::fmt::Display for CreateRepoError {
 
 /// Create a new bare git repository at `base_dir/<name>`.
 /// `name` must end with `.git` and must not contain path separators or `..`.
-pub async fn create_bare_repo(
-    base_dir: &Path,
-    name: &str,
-) -> Result<PathBuf, CreateRepoError> {
+pub async fn create_bare_repo(base_dir: &Path, name: &str) -> Result<PathBuf, CreateRepoError> {
     validate_repo_name(name)?;
 
     let repo_path = base_dir.join(name);
