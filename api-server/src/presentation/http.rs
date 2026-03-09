@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -37,14 +38,16 @@ struct ErrorResponse {
     error: String,
 }
 
-pub async fn serve(base_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(base_dir: PathBuf) -> Result<()> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
 
     let app = build_router(base_dir);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("failed to bind HTTP server to {bind_addr}"))?;
 
     println!("HTTP listening on {bind_addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app).await.context("HTTP server failed")?;
     Ok(())
 }
 
