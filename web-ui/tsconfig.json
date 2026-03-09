@@ -22,6 +22,7 @@
       "@/*": ["./src/*"],
       "feature/*": ["./src/feature/*"],
       "presentation/*": ["./src/presentation/*"],
+      "infrastructure/*": ["./src/infrastructure/*"],
       "shared/*": ["./src/shared/*"]
     }
   },

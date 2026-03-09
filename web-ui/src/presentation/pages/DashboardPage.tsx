@@ -1,3 +1,5 @@
+import { BranchList } from "@/feature/git/branch/components";
+
 export default function DashboardPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
@@ -5,6 +7,7 @@ export default function DashboardPage() {
         <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
           Dashboard Page
         </h1>
+        <BranchList repository="test" />
       </main>
     </div>
   );

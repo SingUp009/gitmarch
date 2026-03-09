@@ -1,0 +1,370 @@
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::env;
+
+use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
+use russh::server::{Auth, Handler, Msg, Server, Session};
+use russh::{Channel, ChannelId, CryptoVec};
+use russh_keys::key::{KeyPair, PublicKey};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub async fn serve(base_dir: PathBuf) -> Result<()> {
+    let bind_addr = env::var("SSH_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:2222".to_string());
+
+    let host_key = KeyPair::generate_ed25519()
+        .ok_or_else(|| anyhow!("failed to generate SSH host key"))?;
+
+    // TODO: persist the host key to disk so clients don't get unknown-host
+    //       warnings on every server restart.
+    //       Suggested env var: SSH_HOST_KEY_PATH (default: ./ssh_host_key)
+
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        ..Default::default()
+    });
+
+    let mut server = SshServer {
+        base_dir: Arc::new(base_dir),
+    };
+
+    println!("SSH listening on {bind_addr}");
+    server
+        .run_on_address(config, &bind_addr)
+        .await
+        .context("SSH server failed")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+struct SshServer {
+    base_dir: Arc<PathBuf>,
+}
+
+impl Server for SshServer {
+    type Handler = SshSession;
+
+    fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> SshSession {
+        SshSession {
+            base_dir: self.base_dir.clone(),
+            child_stdin: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-connection session
+// ---------------------------------------------------------------------------
+
+struct SshSession {
+    base_dir: Arc<PathBuf>,
+    /// Stdin of the spawned git process; populated in `exec_request`.
+    child_stdin: Option<tokio::process::ChildStdin>,
+}
+
+#[async_trait]
+impl Handler for SshSession {
+    type Error = anyhow::Error;
+
+    // Accept every public key for now.
+    // TODO: validate against user-registered keys stored in the database.
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        _public_key: &PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    /// Called when the client sends a command, e.g.
+    /// `git-receive-pack 'myrepo.git'` or `git-upload-pack 'myrepo.git'`.
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).into_owned();
+
+        let (git_cmd, repo_path) = parse_git_ssh_command(&command)
+            .map_err(|e| anyhow!(e))?;
+
+        let resolved = resolve_repo_path(&self.base_dir, &repo_path)
+            .map_err(|e| anyhow!(e))?;
+
+        let mut child = tokio::process::Command::new(&git_cmd)
+            .arg(resolved.to_str().unwrap_or_default())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to spawn git process")?;
+
+        let stdin = child.stdin.take().expect("stdin must be piped");
+        let mut stdout = child.stdout.take().expect("stdout must be piped");
+        let mut stderr = child.stderr.take().expect("stderr must be piped");
+
+        self.child_stdin = Some(stdin);
+
+        let handle = session.handle();
+
+        // Forward stdout and stderr to the SSH channel concurrently,
+        // then send the exit status.
+        tokio::spawn(async move {
+            let mut out_buf = vec![0u8; 32 * 1024];
+            let mut err_buf = vec![0u8; 32 * 1024];
+            let mut stdout_done = false;
+            let mut stderr_done = false;
+
+            while !stdout_done || !stderr_done {
+                tokio::select! {
+                    result = stdout.read(&mut out_buf), if !stdout_done => {
+                        match result {
+                            Ok(0) | Err(_) => stdout_done = true,
+                            Ok(n) => {
+                                if handle
+                                    .data(channel, CryptoVec::from_slice(&out_buf[..n]))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    result = stderr.read(&mut err_buf), if !stderr_done => {
+                        match result {
+                            Ok(0) | Err(_) => stderr_done = true,
+                            Ok(n) => {
+                                if handle
+                                    .extended_data(
+                                        channel,
+                                        1,
+                                        CryptoVec::from_slice(&err_buf[..n]),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let exit_code = child
+                .wait()
+                .await
+                .map(|s| s.code().unwrap_or(1) as u32)
+                .unwrap_or(1);
+
+            let _ = handle.exit_status_request(channel, exit_code).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
+
+        Ok(())
+    }
+
+    /// Forward data received from the client to the git process's stdin.
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(stdin) = &mut self.child_stdin {
+            stdin
+                .write_all(data)
+                .await
+                .context("failed to write to git stdin")?;
+        }
+        Ok(())
+    }
+
+    /// Client closed its send side; drop stdin to signal EOF to the git process.
+    async fn channel_eof(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.child_stdin = None;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Parse `git-receive-pack 'repo.git'` / `git-upload-pack 'repo.git'` and
+/// variants into `(command, repo_path)`.
+fn parse_git_ssh_command(
+    command: &str,
+) -> std::result::Result<(String, String), String> {
+    let command = command.trim();
+
+    let (cmd, rest) = if let Some(r) = command.strip_prefix("git-receive-pack") {
+        ("git-receive-pack", r)
+    } else if let Some(r) = command.strip_prefix("git-upload-pack") {
+        ("git-upload-pack", r)
+    } else if let Some(r) = command.strip_prefix("git receive-pack") {
+        ("git-receive-pack", r)
+    } else if let Some(r) = command.strip_prefix("git upload-pack") {
+        ("git-upload-pack", r)
+    } else {
+        return Err(format!("unsupported git SSH command: `{command}`"));
+    };
+
+    let repo = rest.trim().trim_matches('\'').trim_matches('"');
+    if repo.is_empty() {
+        return Err("missing repository path in SSH command".to_string());
+    }
+
+    Ok((cmd.to_string(), repo.to_string()))
+}
+
+/// Resolve `repo_path` (relative or absolute-looking from the client's
+/// perspective) to a canonical path inside `base_dir`.
+fn resolve_repo_path(
+    base_dir: &Path,
+    repo_path: &str,
+) -> std::result::Result<PathBuf, String> {
+    // Strip a leading '/' that git clients typically include.
+    let repo_path = repo_path.trim_start_matches('/');
+    let relative = Path::new(repo_path);
+
+    if relative.is_absolute() {
+        return Err("absolute repository path is not allowed".to_string());
+    }
+
+    if relative
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err("path traversal (`..`) is not allowed".to_string());
+    }
+
+    let candidate = base_dir.join(relative);
+
+    if !candidate.exists() {
+        return Err(format!("repository `{repo_path}` not found"));
+    }
+
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("failed to resolve repository path: {e}"))?;
+
+    if !canonical.starts_with(base_dir) {
+        return Err("resolved path escapes GIT_BASE_DIR".to_string());
+    }
+
+    Ok(canonical)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_git_ssh_command, resolve_repo_path};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("ssh_test_{name}_{}", stamp))
+    }
+
+    #[test]
+    fn parse_receive_pack_with_single_quotes() {
+        let (cmd, repo) =
+            parse_git_ssh_command("git-receive-pack 'myrepo.git'").unwrap();
+        assert_eq!(cmd, "git-receive-pack");
+        assert_eq!(repo, "myrepo.git");
+    }
+
+    #[test]
+    fn parse_upload_pack_without_quotes() {
+        let (cmd, repo) =
+            parse_git_ssh_command("git-upload-pack myrepo.git").unwrap();
+        assert_eq!(cmd, "git-upload-pack");
+        assert_eq!(repo, "myrepo.git");
+    }
+
+    #[test]
+    fn parse_git_space_variant() {
+        let (cmd, _) =
+            parse_git_ssh_command("git receive-pack 'repo.git'").unwrap();
+        assert_eq!(cmd, "git-receive-pack");
+    }
+
+    #[test]
+    fn parse_unsupported_command_returns_error() {
+        assert!(parse_git_ssh_command("git status").is_err());
+    }
+
+    #[test]
+    fn resolve_valid_path_succeeds() {
+        let base = temp_dir("valid");
+        let repo = base.join("myrepo.git");
+        fs::create_dir_all(&repo).unwrap();
+
+        let result = resolve_repo_path(&base, "myrepo.git");
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolve_with_leading_slash_strips_it() {
+        let base = temp_dir("leading_slash");
+        let repo = base.join("myrepo.git");
+        fs::create_dir_all(&repo).unwrap();
+
+        let result = resolve_repo_path(&base, "/myrepo.git");
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolve_path_traversal_is_rejected() {
+        let base = temp_dir("traversal");
+        fs::create_dir_all(&base).unwrap();
+
+        let result = resolve_repo_path(&base, "../escape");
+        assert!(result.is_err());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn resolve_missing_repo_returns_error() {
+        let base = temp_dir("missing");
+        fs::create_dir_all(&base).unwrap();
+
+        let result = resolve_repo_path(&base, "nonexistent.git");
+        assert!(result.is_err());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+}
