@@ -1,7 +1,7 @@
+use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::env;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -15,11 +15,9 @@ use crate::db::Pool;
 use crate::feature::user;
 
 pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
-    let bind_addr = env::var("SSH_BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:2222".to_string());
+    let bind_addr = env::var("SSH_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:2222".to_string());
 
-    let key_path = env::var("SSH_HOST_KEY_PATH")
-        .unwrap_or_else(|_| "ssh_host_key".to_string());
+    let key_path = env::var("SSH_HOST_KEY_PATH").unwrap_or_else(|_| "ssh_host_key".to_string());
     let host_key = load_or_create_host_key(Path::new(&key_path))
         .context("failed to initialise SSH host key")?;
 
@@ -119,11 +117,9 @@ impl Handler for SshSession {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
 
-        let (git_cmd, repo_path) = parse_git_ssh_command(&command)
-            .map_err(|e| anyhow!(e))?;
+        let (git_cmd, repo_path) = parse_git_ssh_command(&command).map_err(|e| anyhow!(e))?;
 
-        let resolved = resolve_repo_path(&self.base_dir, &repo_path)
-            .map_err(|e| anyhow!(e))?;
+        let resolved = resolve_repo_path(&self.base_dir, &repo_path).map_err(|e| anyhow!(e))?;
 
         let mut child = tokio::process::Command::new(&git_cmd)
             .arg(resolved.to_str().unwrap_or_default())
@@ -256,8 +252,8 @@ fn load_or_create_host_key(key_path: &Path) -> Result<KeyPair> {
     }
 
     // 新しいホスト鍵を生成して保存する
-    let key = KeyPair::generate_ed25519()
-        .ok_or_else(|| anyhow!("failed to generate SSH host key"))?;
+    let key =
+        KeyPair::generate_ed25519().ok_or_else(|| anyhow!("failed to generate SSH host key"))?;
 
     if let KeyPair::Ed25519(ref signing_key) = key {
         let bytes = signing_key.to_bytes();
@@ -265,8 +261,12 @@ fn load_or_create_host_key(key_path: &Path) -> Result<KeyPair> {
         // 親ディレクトリが存在しない場合は作成する
         if let Some(parent) = key_path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create directory for SSH host key: {}", parent.display()))?;
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create directory for SSH host key: {}",
+                        parent.display()
+                    )
+                })?;
             }
         }
 
@@ -289,9 +289,7 @@ fn load_or_create_host_key(key_path: &Path) -> Result<KeyPair> {
 
 /// Parse `git-receive-pack 'repo.git'` / `git-upload-pack 'repo.git'` and
 /// variants into `(command, repo_path)`.
-fn parse_git_ssh_command(
-    command: &str,
-) -> std::result::Result<(String, String), String> {
+fn parse_git_ssh_command(command: &str) -> std::result::Result<(String, String), String> {
     let command = command.trim();
 
     let (cmd, rest) = if let Some(r) = command.strip_prefix("git-receive-pack") {
@@ -316,10 +314,7 @@ fn parse_git_ssh_command(
 
 /// Resolve `repo_path` (relative or absolute-looking from the client's
 /// perspective) to a canonical path inside `base_dir`.
-fn resolve_repo_path(
-    base_dir: &Path,
-    repo_path: &str,
-) -> std::result::Result<PathBuf, String> {
+fn resolve_repo_path(base_dir: &Path, repo_path: &str) -> std::result::Result<PathBuf, String> {
     // Strip a leading '/' that git clients typically include.
     let repo_path = repo_path.trim_start_matches('/');
     let relative = Path::new(repo_path);
@@ -372,24 +367,21 @@ mod tests {
 
     #[test]
     fn parse_receive_pack_with_single_quotes() {
-        let (cmd, repo) =
-            parse_git_ssh_command("git-receive-pack 'myrepo.git'").unwrap();
+        let (cmd, repo) = parse_git_ssh_command("git-receive-pack 'myrepo.git'").unwrap();
         assert_eq!(cmd, "git-receive-pack");
         assert_eq!(repo, "myrepo.git");
     }
 
     #[test]
     fn parse_upload_pack_without_quotes() {
-        let (cmd, repo) =
-            parse_git_ssh_command("git-upload-pack myrepo.git").unwrap();
+        let (cmd, repo) = parse_git_ssh_command("git-upload-pack myrepo.git").unwrap();
         assert_eq!(cmd, "git-upload-pack");
         assert_eq!(repo, "myrepo.git");
     }
 
     #[test]
     fn parse_git_space_variant() {
-        let (cmd, _) =
-            parse_git_ssh_command("git receive-pack 'repo.git'").unwrap();
+        let (cmd, _) = parse_git_ssh_command("git receive-pack 'repo.git'").unwrap();
         assert_eq!(cmd, "git-receive-pack");
     }
 
