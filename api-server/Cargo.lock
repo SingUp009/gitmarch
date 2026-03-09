@@ -62,6 +62,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "data-encoding",
  "russh",
  "russh-keys",
  "serde",
