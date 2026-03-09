@@ -1,0 +1,71 @@
+name: web-ui
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web-ui/**"
+      - ".github/workflows/web-ui.yml"
+  pull_request:
+    paths:
+      - "web-ui/**"
+      - ".github/workflows/web-ui.yml"
+
+defaults:
+  run:
+    working-directory: web-ui
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+
+      - run: npm ci
+
+      - name: vitest
+        run: npm test -- --run
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+
+      - run: npm ci
+
+      - name: oxlint
+        run: npm run lint
+
+      - name: oxfmt
+        run: npm run format:check
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web-ui/.node-version
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+
+      - run: npm ci
+
+      - name: next build
+        run: npm run build
