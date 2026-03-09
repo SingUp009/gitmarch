@@ -63,6 +63,7 @@ dependencies = [
  "async-trait",
  "axum",
  "data-encoding",
+ "dotenvy",
  "ed25519-dalek",
  "russh",
  "russh-keys",

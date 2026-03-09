@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let base_dir = resolve_base_dir()?;
 
     let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "gitmarch.db".to_string());
