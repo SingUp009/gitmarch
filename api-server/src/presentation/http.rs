@@ -1,5 +1,4 @@
 use std::env;
-use std::io::{Error as IoError, ErrorKind};
 use std::path::PathBuf;
 
 use axum::extract::{Path, RawQuery, State};
@@ -38,30 +37,13 @@ struct ErrorResponse {
     error: String,
 }
 
-pub async fn serve() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn serve(base_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-
-    let base_dir_raw = env::var("GIT_BASE_DIR")
-        .map_err(|_| IoError::new(ErrorKind::InvalidInput, "GIT_BASE_DIR is required"))?;
-    let base_dir = std::fs::canonicalize(&base_dir_raw).map_err(|error| {
-        IoError::new(
-            ErrorKind::InvalidInput,
-            format!("failed to canonicalize GIT_BASE_DIR (`{base_dir_raw}`): {error}"),
-        )
-    })?;
-
-    if !base_dir.is_dir() {
-        return Err(IoError::new(
-            ErrorKind::InvalidInput,
-            "GIT_BASE_DIR must point to a directory",
-        )
-        .into());
-    }
 
     let app = build_router(base_dir);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
-    println!("Listening on {bind_addr}");
+    println!("HTTP listening on {bind_addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }
