@@ -5,6 +5,7 @@ use std::env;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use russh::server::{Auth, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, CryptoVec};
 use russh_keys::key::{KeyPair, PublicKey};
@@ -17,12 +18,10 @@ pub async fn serve(base_dir: PathBuf, pool: Arc<Pool>) -> Result<()> {
     let bind_addr = env::var("SSH_BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:2222".to_string());
 
-    let host_key = KeyPair::generate_ed25519()
-        .ok_or_else(|| anyhow!("failed to generate SSH host key"))?;
-
-    // TODO: persist the host key to disk so clients don't get unknown-host
-    //       warnings on every server restart.
-    //       Suggested env var: SSH_HOST_KEY_PATH (default: ./ssh_host_key)
+    let key_path = env::var("SSH_HOST_KEY_PATH")
+        .unwrap_or_else(|_| "ssh_host_key".to_string());
+    let host_key = load_or_create_host_key(Path::new(&key_path))
+        .context("failed to initialise SSH host key")?;
 
     let config = Arc::new(russh::server::Config {
         keys: vec![host_key],
@@ -232,6 +231,62 @@ impl Handler for SshSession {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// ディスクからSSHホスト鍵を読み込む。ファイルが存在しなければ新しい Ed25519 鍵を
+/// 生成してファイルに保存し、次回の起動で再利用できるようにする。
+///
+/// # ファイル形式
+/// Ed25519 秘密鍵の生バイト（32バイト）をそのままファイルに書き込む。
+/// ファイルのパーミッションは Unix では 0o600 (owner-read-write only) に設定する。
+///
+/// # Rust メモ
+/// `KeyPair::Ed25519(ed25519_dalek::SigningKey)` は pub な enum バリアントなので
+/// パターンマッチでフィールドを取り出せる。
+/// `signing_key.to_bytes()` は `[u8; 32]` を返し、
+/// `SigningKey::from_bytes(&bytes)` で復元できる。
+fn load_or_create_host_key(key_path: &Path) -> Result<KeyPair> {
+    if key_path.exists() {
+        let bytes = std::fs::read(key_path)
+            .with_context(|| format!("failed to read SSH host key from {}", key_path.display()))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("SSH host key file has invalid length (expected 32 bytes)"))?;
+        let signing_key = SigningKey::from_bytes(&bytes);
+        println!("SSH host key loaded from {}", key_path.display());
+        return Ok(KeyPair::Ed25519(signing_key));
+    }
+
+    // 新しいホスト鍵を生成して保存する
+    let key = KeyPair::generate_ed25519()
+        .ok_or_else(|| anyhow!("failed to generate SSH host key"))?;
+
+    if let KeyPair::Ed25519(ref signing_key) = key {
+        let bytes = signing_key.to_bytes();
+
+        // 親ディレクトリが存在しない場合は作成する
+        if let Some(parent) = key_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create directory for SSH host key: {}", parent.display()))?;
+            }
+        }
+
+        std::fs::write(key_path, bytes)
+            .with_context(|| format!("failed to write SSH host key to {}", key_path.display()))?;
+
+        // Unix ではファイルパーミッションを 0o600 に設定する（SSH の慣例）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
+        }
+
+        println!("SSH host key generated and saved to {}", key_path.display());
+    }
+
+    Ok(key)
+}
+
 /// Parse `git-receive-pack 'repo.git'` / `git-upload-pack 'repo.git'` and
 /// variants into `(command, repo_path)`.
 fn parse_git_ssh_command(
@@ -302,7 +357,7 @@ fn resolve_repo_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_git_ssh_command, resolve_repo_path};
+    use super::{load_or_create_host_key, parse_git_ssh_command, resolve_repo_path};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -387,5 +442,48 @@ mod tests {
         assert!(result.is_err());
 
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn host_key_is_created_when_missing() {
+        let dir = temp_dir("hostkey_create");
+        fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("ssh_host_key");
+
+        assert!(!key_path.exists());
+        let key = load_or_create_host_key(&key_path).unwrap();
+        assert!(key_path.exists());
+        assert_eq!(fs::read(&key_path).unwrap().len(), 32);
+        drop(key);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn host_key_is_reloaded_consistently() {
+        let dir = temp_dir("hostkey_reload");
+        fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("ssh_host_key");
+
+        // 1回目: 生成
+        let key1 = load_or_create_host_key(&key_path).unwrap();
+        // 2回目: 同じファイルから読み込み
+        let key2 = load_or_create_host_key(&key_path).unwrap();
+
+        // 同じ公開鍵（＝同じ秘密鍵）であることを確認
+        use russh_keys::key::KeyPair;
+        let pub1 = if let KeyPair::Ed25519(ref sk) = key1 {
+            sk.verifying_key().to_bytes()
+        } else {
+            panic!("expected Ed25519");
+        };
+        let pub2 = if let KeyPair::Ed25519(ref sk) = key2 {
+            sk.verifying_key().to_bytes()
+        } else {
+            panic!("expected Ed25519");
+        };
+        assert_eq!(pub1, pub2);
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }
